@@ -63,8 +63,15 @@ Windows:
     "mysql": {
       "command": "node",
       "args": [
-        "/path/to/mysql_mcp_server/dist/server.js"
-      ]
+        "/path/to/mysql_mcp_server/dist/server.js",
+      ],
+      "env": {
+        "MYSQL_HOST": "localhost",
+        "MYSQL_PORT": "3306",
+        "MYSQL_USER": "root",
+        "MYSQL_PASSWORD": "pwd@123",
+        "MYSQL_DATABASE": "asy_app_backend"
+      }
     }
   }
 }
