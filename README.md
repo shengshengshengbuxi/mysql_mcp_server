@@ -69,8 +69,8 @@ Windows:
         "MYSQL_HOST": "localhost",
         "MYSQL_PORT": "3306",
         "MYSQL_USER": "root",
-        "MYSQL_PASSWORD": "pwd@123",
-        "MYSQL_DATABASE": "asy_app_backend"
+        "MYSQL_PASSWORD": "your password",
+        "MYSQL_DATABASE": "your database"
       }
     }
   }
