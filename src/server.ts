@@ -1,164 +1,226 @@
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import mysql from 'mysql2/promise';
-import { z } from 'zod';
-import dotenv from 'dotenv';
+#!/usr/bin/env node
+import { config } from 'dotenv';
+import { Server } from '@modelcontextprotocol/sdk/server/index.js';
+import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 
-// 加载环境变量
-dotenv.config();
+// 加载.env文件
+config();
+import {
+  CallToolRequestSchema,
+  ErrorCode,
+  ListToolsRequestSchema,
+  McpError,
+} from '@modelcontextprotocol/sdk/types.js';
+import { zodToJsonSchema } from 'zod-to-json-schema';
+import { MySQLClient } from './mysql-client.js';
+import {
+  QueryDatabaseSchema,
+  ListDatabasesSchema,
+  ListTablesSchema,
+  DescribeTableSchema,
+} from './types.js';
 
-// 从环境变量读取 MySQL 配置
+// 从环境变量获取MySQL配置
 const MYSQL_HOST = process.env.MYSQL_HOST || 'localhost';
-const MYSQL_PORT = parseInt(process.env.MYSQL_PORT || '3306');
+const MYSQL_PORT = parseInt(process.env.MYSQL_PORT || '3306', 10);
 const MYSQL_USER = process.env.MYSQL_USER || 'root';
-const MYSQL_PASSWORD = process.env.MYSQL_PASSWORD || '';
+const MYSQL_PASSWORD = process.env.MYSQL_PASSWORD || '1234';
 const MYSQL_DATABASE = process.env.MYSQL_DATABASE || '';
 
-// 创建服务器实例
-const server = new McpServer({
-  name: "mysql-mcp-server",
-  version: "1.0.0",
-  description: "MySQL MCP Server",
-  vendor: {
-    name: "Custom MySQL MCP",
-    url: "https://example.com"
+class MySQLServer {
+  private server: Server;
+  private mysqlClient: MySQLClient;
+
+  constructor() {
+    this.server = new Server(
+      {
+        name: 'mysql-mcp-server',
+        version: '1.0.0',
+      },
+      {
+        capabilities: {
+          resources: {},
+          tools: {},
+        },
+      }
+    );
+
+    // 创建MySQL客户端
+    this.mysqlClient = new MySQLClient({
+      host: MYSQL_HOST,
+      port: MYSQL_PORT,
+      user: MYSQL_USER,
+      password: MYSQL_PASSWORD,
+      database: MYSQL_DATABASE,
+    });
+    
+    // 错误处理
+    this.server.onerror = (error) => console.error('[MCP Error]', error);
+    process.on('SIGINT', async () => {
+      await this.cleanup();
+      process.exit(0);
+    });
   }
-});
 
-// 创建 MySQL 连接池
-const pool = mysql.createPool({
-  host: MYSQL_HOST,
-  port: MYSQL_PORT,
-  user: MYSQL_USER,
-  password: MYSQL_PASSWORD,
-  database: MYSQL_DATABASE,
-  waitForConnections: true,
-  connectionLimit: 10,
-  queueLimit: 0
-});
+  private setupToolHandlers() {
+    // 列出可用工具
+    this.server.setRequestHandler(ListToolsRequestSchema, async () => {
+      return {
+        tools: [
+          {
+            name: 'query_database',
+            description: '执行SQL查询并返回结果',
+            inputSchema: zodToJsonSchema(QueryDatabaseSchema),
+          },
+          {
+            name: 'list_databases',
+            description: '列出所有可用的数据库',
+            inputSchema: zodToJsonSchema(ListDatabasesSchema),
+          },
+          {
+            name: 'list_tables',
+            description: '列出指定数据库中的所有表格',
+            inputSchema: zodToJsonSchema(ListTablesSchema),
+          },
+          {
+            name: 'describe_table',
+            description: '描述表格结构',
+            inputSchema: zodToJsonSchema(DescribeTableSchema),
+          },
+        ],
+      };
+    });
 
-// 测试数据库连接
-async function testConnection() {
-  try {
-    const connection = await pool.getConnection();
-    console.error('MySQL 连接成功');
-    connection.release();
-    return true;
-  } catch (err) {
-    console.error(`MySQL 连接错误: ${(err as Error).message}`);
-    if ((err as any).code === 'ECONNREFUSED') {
-      console.error(`无法连接到 MySQL 服务器: ${MYSQL_HOST}:${MYSQL_PORT}`);
-    } else if ((err as any).code === 'ER_ACCESS_DENIED_ERROR') {
-      console.error('MySQL 用户名或密码错误');
-    } else if ((err as any).code === 'ER_BAD_DB_ERROR') {
-      console.error(`数据库 '${MYSQL_DATABASE}' 不存在`);
+    // 处理工具调用
+    this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
+      try {
+        switch (request.params.name) {
+          case 'query_database':
+            return await this.handleQueryDatabase(request.params.arguments);
+          case 'list_databases':
+            return await this.handleListDatabases();
+          case 'list_tables':
+            return await this.handleListTables(request.params.arguments);
+          case 'describe_table':
+            return await this.handleDescribeTable(request.params.arguments);
+          default:
+            throw new McpError(
+              ErrorCode.MethodNotFound,
+              `未知工具: ${request.params.name}`
+            );
+        }
+      } catch (error) {
+        console.error('Tool execution error:', error);
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `执行错误: ${error instanceof Error ? error.message : String(error)}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    });
+  }
+
+  private async handleQueryDatabase(args: any) {
+    const { sql, params } = QueryDatabaseSchema.parse(args);
+    try {
+      const results = await this.mysqlClient.executeQuery(sql, params);
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify(results, null, 2),
+          },
+        ],
+      };
+    } catch (error) {
+      throw new McpError(
+        ErrorCode.InternalError,
+        `SQL执行错误: ${error instanceof Error ? error.message : String(error)}`
+      );
     }
-    return false;
+  }
+
+  private async handleListDatabases() {
+    try {
+      const databases = await this.mysqlClient.listDatabases();
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify(databases, null, 2),
+          },
+        ],
+      };
+    } catch (error) {
+      throw new McpError(
+        ErrorCode.InternalError,
+        `获取数据库列表错误: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  }
+
+  private async handleListTables(args: any) {
+    const { database } = ListTablesSchema.parse(args);
+    try {
+      const tables = await this.mysqlClient.listTables(database);
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify(tables, null, 2),
+          },
+        ],
+      };
+    } catch (error) {
+      throw new McpError(
+        ErrorCode.InternalError,
+        `获取表格列表错误: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  }
+
+  private async handleDescribeTable(args: any) {
+    const { table, database } = DescribeTableSchema.parse(args);
+    try {
+      const tableInfo = await this.mysqlClient.describeTable(table, database);
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify(tableInfo, null, 2),
+          },
+        ],
+      };
+    } catch (error) {
+      throw new McpError(
+        ErrorCode.InternalError,
+        `获取表格结构错误: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  }
+
+  async cleanup() {
+    try {
+      await this.mysqlClient.close();
+      await this.server.close();
+    } catch (error) {
+      console.error('Cleanup error:', error);
+    }
+  }
+
+  async run() {
+    // 设置工具处理程序（在连接之前）
+    this.setupToolHandlers();
+    
+    const transport = new StdioServerTransport();
+    await this.server.connect(transport);
+    console.error('MySQL MCP server running on stdio');
   }
 }
 
-// 定义执行SQL查询的工具
-server.tool(
-  "execute_sql",
-  { query: z.string().describe("The SQL query to execute") },
-  async ({ query }) => {
-    try {
-      // 执行 SQL 查询
-      const [results] = await pool.query(query);
-
-      // 根据查询类型返回结果
-      if (query.trim().toUpperCase().startsWith('SELECT') || query.trim().toUpperCase().startsWith('SHOW')) {
-        return {
-          content: [{
-            type: "text",
-            text: JSON.stringify(results, null, 2)
-          }]
-        };
-      } else {
-        const affectedRows = (results as any).affectedRows || 0;
-        return {
-          content: [{
-            type: "text",
-            text: `${affectedRows} rows affected`
-          }]
-        };
-      }
-    } catch (err) {
-      return {
-        content: [{
-          type: "text",
-          text: `MySQL error: ${(err as Error).message}`
-        }],
-        isError: true
-      };
-    }
-  }
-);
-
-// 定义数据库健康检查工具
-server.tool(
-  "check_connection",
-  {},
-  async () => {
-    try {
-      const connection = await pool.getConnection();
-      connection.release();
-      return {
-        content: [{
-          type: "text",
-          text: "Database connection successful"
-        }]
-      };
-    } catch (err) {
-      return {
-        content: [{
-          type: "text",
-          text: `Database connection failed: ${(err as Error).message}`
-        }],
-        isError: true
-      };
-    }
-  }
-);
-
-// 添加一个提示示例，帮助用户了解如何使用SQL查询
-server.prompt(
-  "sql_example",
-  {},
-  () => ({
-    messages: [{
-      role: "user",
-      content: {
-        type: "text",
-        text: `您可以通过execute_sql工具执行SQL查询。例如：
-        
-- 查询表: SELECT * FROM users LIMIT 10;
-- 创建表: CREATE TABLE users (id INT PRIMARY KEY, name VARCHAR(100));
-- 插入数据: INSERT INTO users (id, name) VALUES (1, 'John Doe');
-- 更新数据: UPDATE users SET name = 'Jane Doe' WHERE id = 1;
-- 删除数据: DELETE FROM users WHERE id = 1;
-
-请问您想执行什么SQL查询？`
-      }
-    }]
-  })
-);
-
-// 启动服务器
-async function start() {
-  // 测试数据库连接
-  await testConnection();
-
-  // 打印启动消息
-  console.error('MySQL MCP 服务器已启动，等待请求...');
-  console.error(`连接到：${MYSQL_HOST}:${MYSQL_PORT}，数据库：${MYSQL_DATABASE || '(默认)'}`);
-
-  // 连接到stdio传输层
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
-}
-
-start().catch(err => {
-  console.error('启动失败:', err);
-  process.exit(1);
-}); 
+const server = new MySQLServer();
+server.run().catch(console.error);
